@@ -1,0 +1,396 @@
+use std::{
+    io::{Error, Result},
+    path::PathBuf,
+    time::Duration,
+};
+
+use clap::Parser;
+use itertools::{Either, Itertools};
+use once_cell::sync::Lazy;
+use opentelemetry::{trace::TracerProvider as _, InstrumentationScope};
+use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::{
+    metrics::{periodic_reader_with_async_runtime::PeriodicReader, SdkMeterProvider},
+    trace::{span_processor_with_async_runtime::BatchSpanProcessor, SdkTracerProvider},
+};
+use svix_bridge_types::{PollerInput, SenderInput, TransformerJob};
+use svix_ksuid::{KsuidLike as _, KsuidMs};
+#[cfg(all(not(target_env = "msvc"), feature = "jemalloc"))]
+use tikv_jemallocator::Jemalloc;
+use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
+
+use self::config::Config;
+
+mod allocator;
+mod config;
+mod http_output;
+mod metrics;
+mod runtime;
+mod webhook_receiver;
+
+use crate::{
+    allocator::{get_allocator_stat_mibs, get_allocator_stats},
+    config::{EitherReceiver, PollerReceiverConfig, WebhookReceiverConfig},
+    metrics::CommonMetrics,
+};
+
+#[cfg(all(not(target_env = "msvc"), feature = "jemalloc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
+#[cfg(all(target_env = "msvc", feature = "jemalloc"))]
+compile_error!("jemalloc cannot be enabled on msvc");
+
+// Seems like it would be useful to be able to configure this.
+// In some docker setups, hostname is sometimes the container id, and advertising this can be
+// helpful.
+static INSTANCE_ID: Lazy<String> = Lazy::new(|| KsuidMs::new(None, None).to_string());
+
+fn get_svc_identifiers(cfg: &Config) -> opentelemetry_sdk::Resource {
+    opentelemetry_sdk::Resource::builder()
+        .with_service_name(
+            cfg.opentelemetry
+                .as_ref()
+                .and_then(|x| x.service_name.as_deref())
+                .unwrap_or("svix-bridge")
+                .to_owned(),
+        )
+        .with_attribute(opentelemetry::KeyValue::new(
+            "instance_id",
+            INSTANCE_ID.as_str(),
+        ))
+        .build()
+}
+
+fn setup_tracing(cfg: &Config) -> Option<SdkTracerProvider> {
+    let filter_directives = std::env::var("RUST_LOG").unwrap_or_else(|e| {
+        if let std::env::VarError::NotUnicode(_) = e {
+            eprintln!("RUST_LOG environment variable has non-utf8 contents, ignoring!");
+        }
+
+        const CRATE_NAME: &str = env!("CARGO_CRATE_NAME");
+        let level = cfg.log_level.to_string();
+        let var = [
+            format!("{CRATE_NAME}={level}"),
+            // XXX: Assuming this applies to the Producer side (aka `og-ingester`) when we fold it back in.
+            format!("tower_http={level}"),
+        ];
+        var.join(",")
+    });
+
+    let mapped = cfg.opentelemetry.as_ref().map(|otel_cfg| {
+        // Configure the OpenTelemetry tracing layer
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&otel_cfg.address)
+            .build()
+            .unwrap();
+
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(
+                BatchSpanProcessor::builder(exporter, opentelemetry_sdk::runtime::Tokio).build(),
+            )
+            .with_sampler(
+                otel_cfg
+                    .sample_ratio
+                    .map(opentelemetry_sdk::trace::Sampler::TraceIdRatioBased)
+                    .unwrap_or(opentelemetry_sdk::trace::Sampler::AlwaysOn),
+            )
+            .with_resource(get_svc_identifiers(cfg))
+            .build();
+
+        let layer = tracing_opentelemetry::layer().with_tracer(
+            provider.tracer_with_scope(InstrumentationScope::builder("svix_bridge").build()),
+        );
+
+        _ = opentelemetry::global::set_tracer_provider(provider.clone());
+        (layer, provider)
+    });
+
+    let (otel_layer, otel_tracer_provider) = mapped.unzip();
+
+    // Then create a subscriber with an additional layer printing to stdout.
+    // This additional layer is either formatted normally or in JSON format.
+    match cfg.log_format {
+        config::LogFormat::Default => {
+            let stdout_layer = tracing_subscriber::fmt::layer();
+            tracing_subscriber::Registry::default()
+                .with(otel_layer)
+                .with(stdout_layer)
+                .with(tracing_subscriber::EnvFilter::new(filter_directives))
+                .init()
+        }
+        config::LogFormat::Json => {
+            let fmt = tracing_subscriber::fmt::format().json().flatten_event(true);
+            let json_fields = tracing_subscriber::fmt::format::JsonFields::new();
+
+            let stdout_layer = tracing_subscriber::fmt::layer()
+                .event_format(fmt)
+                .fmt_fields(json_fields);
+
+            tracing_subscriber::Registry::default()
+                .with(otel_layer)
+                .with(stdout_layer)
+                .with(tracing_subscriber::EnvFilter::new(filter_directives))
+                .init()
+        }
+    };
+
+    otel_tracer_provider
+}
+
+pub fn setup_metrics(cfg: &Config) {
+    if let Some(otel_cfg) = &cfg.opentelemetry {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(&otel_cfg.address)
+            .with_temporality(opentelemetry_sdk::metrics::Temporality::Delta)
+            .build()
+            .unwrap();
+
+        let reader = PeriodicReader::builder(exporter, opentelemetry_sdk::runtime::Tokio).build();
+
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(get_svc_identifiers(cfg))
+            .build();
+
+        opentelemetry::global::set_meter_provider(provider);
+    }
+}
+
+async fn supervise_senders(inputs: Vec<Box<dyn SenderInput>>) -> Result<()> {
+    let mut set = tokio::task::JoinSet::new();
+    for input in inputs {
+        set.spawn(async move {
+            // FIXME: needs much better signaling for termination
+            loop {
+                // If this future returns, the consumer terminated unexpectedly.
+                input.run().await;
+
+                tracing::warn!("sender input {} unexpectedly terminated", input.name());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // FIXME: add signal handling to trigger a (intentional) graceful shutdown.
+
+    // FIXME: when a plugin exits unexpectedly, what do?
+    //   Most consumers are probably stateful/brittle and may disconnect from time to time.
+    //   Ideally none of these tasks would ever return Ok or Err. They'd run forever.
+    //   Having the tasks themselves try to recover means if we see a task finish here, something
+    //   must be really wrong, so maybe we trigger a shutdown of the rest when one stops here.
+    while let Some(_res) = set.join_next().await {
+        // In order for plugins to coordinate a shutdown, maybe they could:
+        // - have a shutdown method and handle their own internal signalling, or maybe
+        // - take a oneshot channel as an arg to `run()`
+        // Basically we need something that formalizes the shutdown flow in a cross-crate
+        // friendly way.
+        todo!("graceful shutdown");
+    }
+    Ok(())
+}
+
+/// Pollers make HTTP requests in a loop and forward what they fetch to their `ReceiverOutput`
+async fn supervise_pollers(inputs: Vec<Box<dyn PollerInput>>) -> std::io::Result<()> {
+    let mut set = tokio::task::JoinSet::new();
+    for input in inputs {
+        set.spawn(async move {
+            // FIXME: needs much better signaling for termination
+            loop {
+                // If this future returns, the consumer terminated unexpectedly.
+                input.run().await;
+
+                tracing::warn!("poller input {} unexpectedly terminated", input.name());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // FIXME: add signal handling to trigger a (intentional) graceful shutdown.
+
+    // FIXME: when a plugin exits unexpectedly, what do?
+    //   Most consumers are probably stateful/brittle and may disconnect from time to time.
+    //   Ideally none of these tasks would ever return Ok or Err. They'd run forever.
+    //   Having the tasks themselves try to recover means if we see a task finish here, something
+    //   must be really wrong, so maybe we trigger a shutdown of the rest when one stops here.
+    while let Some(_res) = set.join_next().await {
+        // In order for plugins to coordinate a shutdown, maybe they could:
+        // - have a shutdown method and handle their own internal signalling, or maybe
+        // - take a oneshot channel as an arg to `run()`
+        // Basically we need something that formalizes the shutdown flow in a cross-crate
+        // friendly way.
+        todo!("graceful shutdown");
+    }
+    Ok(())
+}
+
+#[derive(Parser)]
+pub struct Args {
+    #[arg(long, env = "SVIX_BRIDGE_CFG_FILE", help = "Path to the config file.")]
+    cfg_file: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "SVIX_BRIDGE_CFG",
+        help = "Config data as a string (instead of a file on disk).",
+        conflicts_with = "cfg_file"
+    )]
+    cfg: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let mut config_search_paths = vec![];
+
+    if let Some(fp) = args.cfg_file {
+        config_search_paths.push(fp)
+    } else {
+        for name in ["svix-bridge.yaml", "svix-bridge.yml", "svix-bridge.json"] {
+            config_search_paths.push(std::env::current_dir().expect("current dir").join(name));
+        }
+    }
+
+    // Clap will ensure we have only one or the other (cfg and cfg_file can't be specified together).
+    let cfg_source = match args.cfg {
+        Some(cfg_source) => cfg_source,
+        None => {
+            let fp = config_search_paths
+                .into_iter()
+                .find(|x| x.exists())
+                .expect("config file path");
+            std::fs::read_to_string(&fp).map_err(|e| {
+                let p = fp.into_os_string().into_string().expect("config file path");
+                Error::other(format!("Failed to read {p}: {e}"))
+            })
+        }?,
+    };
+
+    let vars = std::env::vars().collect();
+    let cfg = Config::from_src(&cfg_source, Some(vars).as_ref())?;
+    let otel_tracer_provider = setup_tracing(&cfg);
+    setup_metrics(&cfg);
+    tracing::info!("starting");
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        let metrics = CommonMetrics::new(&opentelemetry::global::meter("svix.com"));
+        match get_allocator_stat_mibs() {
+            Ok(mibs) => {
+                tracing::debug!("Common Metrics Collection: Started");
+
+                loop {
+                    interval.tick().await;
+
+                    if let Ok(Some((allocated, resident))) = get_allocator_stats(true, &mibs) {
+                        metrics.record_mem_allocated(allocated as _);
+                        metrics.record_mem_resident(resident as _);
+                    }
+                }
+            }
+            Err(e) => tracing::error!("Unable to get allocator stats mibs: {e}"),
+        }
+    });
+
+    let (xform_tx, mut xform_rx) = tokio::sync::mpsc::unbounded_channel::<TransformerJob>();
+
+    // XXX: this is a bit nasty, but might be okay to start.
+    // The nested spawns are needed to make sure we can saturate the
+    // threadpool (otherwise we'd run each job serially).
+    //
+    // Another approach would be to do what og-ingester did: give each plugin a clone of the
+    // `TpHandle`, but this would likely mean moving the runtime module over to the `-types` crate.
+    // I'd rather not do this, mostly to help keep things more unit test friendly; channels can
+    // help keep the coupling more loose, with less stateful baggage.
+    // Starting with this just to keep the JS executor stuff here in the binary.
+    tokio::spawn(async move {
+        tracing::info!(
+            "Starting JS Transformation Workers: {}",
+            cfg.transformation_worker_count
+        );
+
+        deno_core::JsRuntime::init_platform(None, false);
+        let pooler: runtime::JsPooler = runtime::JsPooler::new(cfg.transformation_worker_count);
+
+        while let Some(TransformerJob {
+            input,
+            script,
+            callback_tx,
+        }) = xform_rx.recv().await
+        {
+            let tp = pooler.clone();
+            tokio::spawn(async move {
+                let out = tp.run_script(input, script).await;
+                // FIXME: seeing this Err case come up during load testing.
+                //   Seems like we shouldn't be hitting this so easily while the process is not terminating.
+                //   Regularly there are group error log lines that show up right at the end of an
+                //   `oha` run, POSTing to receivers. Need to investigate why.
+                if callback_tx
+                    .send(out.map_err(|e| tracing::error!("{:?}", e)))
+                    .is_err()
+                {
+                    // If the callback fails, the plugin is likely unwinding/dropping.
+                    // Not a whole lot we can do about that.
+                    tracing::error!("failed to send js output back to caller");
+                }
+            });
+        }
+    });
+
+    let mut senders = Vec::with_capacity(cfg.senders.len());
+    for sc in cfg.senders {
+        let mut sender: Box<dyn SenderInput> = sc.try_into().map_err(Error::other)?;
+        sender.set_transformer(Some(xform_tx.clone()));
+        senders.push(sender);
+    }
+    if senders.is_empty() {
+        tracing::warn!("No senders configured.")
+    }
+    let senders_fut = supervise_senders(senders);
+
+    if cfg.receivers.is_empty() {
+        tracing::warn!("No receivers configured.")
+    }
+    let (webhook_receivers, poller_receivers): (
+        Vec<WebhookReceiverConfig>,
+        Vec<PollerReceiverConfig>,
+    ) = cfg
+        .receivers
+        .into_iter()
+        .partition_map(|either| match either {
+            EitherReceiver::Webhook(x) => Either::Left(x),
+            EitherReceiver::Poller(y) => Either::Right(y),
+        });
+
+    let webhook_receivers_fut =
+        webhook_receiver::run(cfg.http_listen_address, webhook_receivers, xform_tx.clone());
+
+    let mut pollers: Vec<Box<dyn PollerInput>> = Vec::with_capacity(poller_receivers.len());
+    for poller_cfg in poller_receivers {
+        pollers.push(poller_cfg.into_poller_input(xform_tx.clone()).await?);
+    }
+
+    let poller_receivers_fut = supervise_pollers(pollers);
+
+    match tokio::try_join!(senders_fut, webhook_receivers_fut, poller_receivers_fut) {
+        Ok(_) => tracing::error!("unexpectedly exiting"),
+        Err(e) => tracing::error!("unexpectedly exiting: {}", e),
+    }
+
+    tracing::info!("exiting...");
+
+    if let Some(provider) = otel_tracer_provider {
+        _ = tokio::task::spawn_blocking(move || {
+            _ = provider.shutdown();
+        })
+        .await;
+    }
+
+    Ok(())
+}

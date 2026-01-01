@@ -1,0 +1,79 @@
+[package]
+name = "svix"
+version = "1.90.0"
+authors = ["Svix Inc. <oss@svix.com>"]
+edition = "2021"
+description = "Svix webhooks API client and webhook verification library"
+homepage = "https://www.svix.com"
+repository = "https://github.com/svix/svix-webhooks"
+readme = "../README.md"
+license = "MIT"
+keywords = ["svix", "webhooks", "diahook"]
+categories = [
+    "development-tools",
+    "asynchronous",
+    "network-programming",
+    "web-programming",
+]
+include = ["src/**/*", "README.md"]
+# bump .github/workflows/rust-link.yml when changing this
+rust-version = "1.88"
+
+[features]
+# openssl-sys keeps showing up in the CLI dep graph, breaking the build, even when
+# `default-features = false`.
+# Switcing the default to rustls properly culls it from the tree.
+default = ["http1", "rustls-tls"]
+
+http1 = ["hyper-util/http1", "hyper-rustls?/http1"]
+http2 = ["hyper-util/http2", "hyper-rustls?/http2"]
+native-tls = ["dep:hyper-tls"]
+rustls-tls = ["dep:hyper-rustls", "dep:rustls", "hyper-rustls?/rustls-native-certs"]
+svix_beta = []
+
+[dependencies]
+base64 = "0.13"
+hmac-sha256 = "1"
+http02 = { package = "http", version = "0.2.0" }
+http1 = { package = "http", version = "1.0.0" }
+http-body-util = "0.1.0"
+hyper = "1.7.0"
+hyper-rustls = { version = "0.27.7", optional = true }
+hyper-tls = { version = "0.6.0", optional = true }
+hyper-util = { version = "0.1.16", features = ["client", "client-legacy", "tokio"] }
+itertools = "0.14.0"
+js_option = "0.1.1"
+percent-encoding = "2.3.1"
+rand = "0.9.0"
+rustls = { version = "0.23.31", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_repr = "0.1"
+thiserror = "2.0.11"
+time = "0.3"
+tokio = { version = "1.41.0", features = ["time"] }
+tower-service = "0.3.3"
+tracing = { version = "0.1.41", default-features = false }
+url = "2.2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1.41.0", features = ["macros"] }
+wiremock = "0.6.2, <0.6.5"
+
+[package.metadata.cargo-public-api-crates]
+allowed = [
+    "http",
+    "serde",
+    "serde_json",
+    # Used in WebhookError, breaking change to remove from public API.
+    "base64",
+]
+
+[lints.rust]
+# below clippy allow rule is for a lint that's not on stable yet 😒
+unknown_lints = "allow"
+
+[lints.clippy]
+all = { priority = -1, level = "warn" }
+literal_string_with_formatting_args = "allow"

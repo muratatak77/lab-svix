@@ -1,0 +1,112 @@
+name: Server CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/**'
+      - '.github/workflows/server-ci.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/server-ci.yml'
+
+# When pushing to a PR, cancel any jobs still running for the previous head commit of the PR
+concurrency:
+  # head_ref is only defined for pull requests, run_id is always unique and defined so if this
+  # workflow was not triggered by a pull request, nothing gets cancelled.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check-fmt:
+    name: Check formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: rustfmt
+        run: cargo fmt -- --check
+        working-directory: server
+
+  check-unused-deps:
+    name: Check for unused dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: taiki-e/install-action@cargo-machete
+
+      - run: cargo machete
+        working-directory: server
+
+  test-versions:
+    name: Server CI
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        # bump this when bumping the MSRV
+        rust: ["1.88.0"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "server -> target"
+          # only save the cache on the main branch
+          # cf https://github.com/Swatinem/rust-cache/issues/95
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # include relevant information in the cache name
+          prefix-key: "server-${{ matrix.rust }}"
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Build
+        run: cargo test --all-features --no-run --locked
+        working-directory: server
+
+      - name: Install dependencies
+        run: sudo apt-get install -y jq
+
+      - name: Check for uncommited OpenAPI changes
+        working-directory: ./server
+        run: ./generate-openapi.sh --check
+
+      - name: Start dependencies
+        run: docker compose -f "server/testing-docker-compose.yml" up -d
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: server
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+          SVIX_REDIS_DSN: "redis://localhost:6379"
+          SVIX_QUEUE_TYPE: "redis"
+          SVIX_JWT_SECRET: "test value"
+          SVIX_CACHE_TYPE: "memory"
+        run: cargo run -- --wait-for 15 migrate
+        working-directory: server
+
+      - name: Run tests
+        working-directory: ./server
+        run: ./run-tests.sh
+
+      - name: Stop dependencies
+        run: docker compose -f "server/testing-docker-compose.yml" down

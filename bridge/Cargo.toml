@@ -1,0 +1,46 @@
+[workspace]
+# Earlier versions of deno fail to compile in a workspace because of wgpu-hal
+# The "fix" is to enable resolver 2 at the workspace. Crates with edition 2021
+# use this by default, but workspaces are set independently for some reason.
+# <https://stackoverflow.com/questions/73967574/dependency-fails-to-compile-in-workspace-but-not-in-package>
+resolver = "2"
+
+members = [
+    "svix-bridge",
+    "svix-bridge-types",
+    "svix-bridge-plugin-queue",
+    "svix-bridge-plugin-kafka",
+]
+
+[workspace.package]
+version = "1.90.0"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+trivial_numeric_casts = "warn"
+
+[workspace.lints.clippy]
+clone_on_ref_ptr = "warn"
+cloned_instead_of_copied = "warn"
+dbg_macro = "warn"
+inefficient_to_string = "warn"
+macro_use_imports = "warn"
+mut_mut = "warn"
+nonstandard_macro_braces = "warn"
+uninlined_format_args = "warn"
+
+[workspace.dependencies]
+opentelemetry = "0.29.0"
+opentelemetry_sdk = { version = "0.29.0", features = ["metrics", "rt-tokio", "experimental_metrics_periodicreader_with_async_runtime", "experimental_trace_batch_span_processor_with_async_runtime"] }
+opentelemetry-otlp = { version = "0.29.0", features = ["metrics", "grpc-tonic", "reqwest-client"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+svix-bridge-types = { path = "svix-bridge-types" }
+thiserror = "2.0.18"
+tokio = { version = "1.38.0", features = ["macros", "time", "rt-multi-thread", "sync"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+wiremock = "0.6.0"
+
+[profile.dev.package]
+quote = { opt-level = 2 }
