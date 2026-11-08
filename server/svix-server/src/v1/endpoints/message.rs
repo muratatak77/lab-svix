@@ -45,28 +45,36 @@ use crate::{
     },
 };
 
-pub fn validate_tags_msg(tags: &MessageTagSet) -> Result<(), ValidationError> {
-    let len = tags.0.len();
+/// Checks that a set field has between 1 and 5 items.
+///
+/// `field` is the error code and `msg` the error message used when it does not.
+fn validate_set_len(
+    len: usize,
+    field: &'static str,
+    msg: &'static str,
+) -> Result<(), ValidationError> {
     if !(1..=5).contains(&len) {
-        Err(validation_error(
-            Some("tags"),
-            Some("Tags must have at least 1 and at most 5 items, or be set to null."),
-        ))
+        Err(validation_error(Some(field), Some(msg)))
     } else {
         Ok(())
     }
 }
 
+/// Returns an error unless the set has between 1 and 5 tags.
+pub fn validate_tags_msg(tags: &MessageTagSet) -> Result<(), ValidationError> {
+    validate_set_len(
+        tags.0.len(),
+        "tags",
+        "Tags must have at least 1 and at most 5 items, or be set to null.",
+    )
+}
+
 pub fn validate_channels_msg(channels: &EventChannelSet) -> Result<(), ValidationError> {
-    let len = channels.0.len();
-    if !(1..=5).contains(&len) {
-        Err(validation_error(
-            Some("channels"),
-            Some("Channels must have at least 1 and at most 5 items, or be set to null."),
-        ))
-    } else {
-        Ok(())
-    }
+    validate_set_len(
+        channels.0.len(),
+        "channels",
+        "Channels must have at least 1 and at most 5 items, or be set to null.",
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -229,7 +237,8 @@ pub struct MessageOut {
     /// List of free-form identifiers that endpoints can filter by
     #[schemars(length(min = 1, max = 5), example = "example_channel_set")]
     pub channels: Option<EventChannelSet>,
-    #[schemars(example = "example_tag_set")]
+    /// List of free-form tags that can be filtered by when listing messages
+    #[schemars(length(min = 1, max = 5), example = "example_tag_set")]
     pub tags: Option<MessageTagSet>,
     pub id: MessageId,
     #[serde(rename = "timestamp")]
@@ -610,7 +619,7 @@ mod tests {
 
     use super::{
         CreateMessageQueryParams, GetMessageQueryParams, ListMessagesQueryParams, MessageIn,
-        default_true,
+        default_true, validate_set_len,
     };
 
     const CHANNEL_INVALID: &str = "$$invalid-channel";
@@ -743,5 +752,17 @@ mod tests {
     fn test_get_message_query_params_default() {
         let q: GetMessageQueryParams = serde_json::from_value(json!({})).unwrap();
         assert!(q.with_content);
+    }
+
+    #[test]
+    fn test_validate_set_len() {
+        for (len, ok) in [(0, false), (1, true), (3, true), (5, true), (6, false)] {
+            let res = validate_set_len(len, "tags", "msg");
+            assert_eq!(res.is_ok(), ok, "len {len}");
+            if let Err(e) = res {
+                assert_eq!(e.code, "tags");
+                assert_eq!(e.message.as_deref(), Some("msg"));
+            }
+        }
     }
 }

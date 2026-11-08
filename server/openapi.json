@@ -612,6 +612,7 @@
                         "$ref": "#/components/schemas/MessageStatus"
                     },
                     "tags": {
+                        "description": "List of free-form tags that can be filtered by when listing messages",
                         "example": [
                             "my_tag",
                             "other"
@@ -622,6 +623,8 @@
                             "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
                             "type": "string"
                         },
+                        "maxItems": 5,
+                        "minItems": 1,
                         "nullable": true,
                         "type": "array",
                         "uniqueItems": true
@@ -2152,6 +2155,7 @@
                         "type": "object"
                     },
                     "tags": {
+                        "description": "List of free-form tags that can be filtered by when listing messages",
                         "example": [
                             "my_tag",
                             "other"
@@ -2162,6 +2166,8 @@
                             "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
                             "type": "string"
                         },
+                        "maxItems": 5,
+                        "minItems": 1,
                         "nullable": true,
                         "type": "array",
                         "uniqueItems": true

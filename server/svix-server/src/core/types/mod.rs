@@ -231,30 +231,34 @@ pub trait BaseId: Deref<Target = String> {
     }
 }
 
-fn validate_limited_str(s: &str) -> Result<(), ValidationErrors> {
-    const MAX_LENGTH: usize = 256;
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9\-_.]+$").unwrap());
+/// Error messages used by [`validate_pattern_str`].
+struct PatternStrMessages {
+    empty: &'static str,
+    too_long: &'static str,
+    pattern: &'static str,
+}
+
+fn validate_pattern_str(
+    s: &str,
+    re: &Regex,
+    max_length: usize,
+    msgs: &PatternStrMessages,
+) -> Result<(), ValidationErrors> {
     let mut errors = ValidationErrors::new();
     if s.is_empty() {
         errors.add(
             ALL_ERROR,
-            validation_error(
-                Some("length"),
-                Some("String must be at least one character"),
-            ),
+            validation_error(Some("length"), Some(msgs.empty)),
         );
-    } else if s.len() > MAX_LENGTH {
+    } else if s.len() > max_length {
         errors.add(
             ALL_ERROR,
-            validation_error(Some("length"), Some("String too long")),
+            validation_error(Some("length"), Some(msgs.too_long)),
         );
-    } else if !RE.is_match(s) {
+    } else if !re.is_match(s) {
         errors.add(
             ALL_ERROR,
-            validation_error(
-                Some("illegal_string_pattern"),
-                Some("String must match the following pattern: [a-zA-Z0-9\\-_.]."),
-            ),
+            validation_error(Some("illegal_string_pattern"), Some(msgs.pattern)),
         );
     }
     if errors.is_empty() {
@@ -262,6 +266,21 @@ fn validate_limited_str(s: &str) -> Result<(), ValidationErrors> {
     } else {
         Err(errors)
     }
+}
+
+fn validate_limited_str(s: &str) -> Result<(), ValidationErrors> {
+    const MAX_LENGTH: usize = 256;
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9\-_.]+$").unwrap());
+    validate_pattern_str(
+        s,
+        &RE,
+        MAX_LENGTH,
+        &PatternStrMessages {
+            empty: "String must be at least one character",
+            too_long: "String too long",
+            pattern: "String must match the following pattern: [a-zA-Z0-9\\-_.].",
+        },
+    )
 }
 
 pub trait BaseUid: Deref<Target = String> {
@@ -640,38 +659,23 @@ impl MessageTag {
 
 impl Validate for MessageTag {
     fn validate(&self) -> Result<(), validator::ValidationErrors> {
-        // Tags are a bit more permissive than channels: on top of the usual identifier
+        // Tags allow more characters than channels: on top of the usual identifier
         // characters they may contain `/`, `\` and `#`, which makes it possible to tag
         // messages with things like resource paths (`user/42`) or ticket refs (`issue#7`).
+        // This only concerns the allowed characters; the length cap is lower (128 vs 256).
         static RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9\-_./\\#]+$").unwrap());
 
-        let mut errors = ValidationErrors::new();
-        if self.0.is_empty() {
-            errors.add(
-                ALL_ERROR,
-                validation_error(Some("length"), Some("Tag must be at least one character")),
-            );
-        } else if self.0.len() > Self::MAX_LENGTH {
-            errors.add(
-                ALL_ERROR,
-                validation_error(Some("length"), Some("Tag too long")),
-            );
-        } else if !RE.is_match(&self.0) {
-            errors.add(
-                ALL_ERROR,
-                validation_error(
-                    Some("illegal_string_pattern"),
-                    Some("Tag must match the following pattern: [a-zA-Z0-9\\-_./\\\\#]."),
-                ),
-            );
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        validate_pattern_str(
+            &self.0,
+            &RE,
+            Self::MAX_LENGTH,
+            &PatternStrMessages {
+                empty: "Tag must be at least one character",
+                too_long: "Tag too long",
+                pattern: "Tag must match the following pattern: [a-zA-Z0-9\\-_./\\\\#].",
+            },
+        )
     }
 }
 
