@@ -262,3 +262,5 @@ mod tests {
         assert!(cache.delete(&key).await.is_ok());
     }
 }
+
+// Lab note.
