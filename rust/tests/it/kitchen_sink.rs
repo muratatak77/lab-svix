@@ -1,7 +1,7 @@
 use js_option::JsOption;
 use std::{collections::HashSet, time::Duration};
 use svix::{
-    api::{ApplicationIn, EndpointIn, EndpointPatch, EventTypeIn},
+    api::{ApplicationIn, EndpointIn, EndpointPatch, EventTypeIn, MessageIn, MessageListOptions},
     error::Error,
 };
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -128,6 +128,81 @@ async fn test_endpoint_crud() {
         .delete(app.id.clone(), ep.id)
         .await
         .unwrap();
+
+    client.application().delete(app.id).await.unwrap()
+}
+
+// Opt-in with `cargo test --ignored`
+#[ignore]
+#[tokio::test]
+async fn test_message_tags() {
+    let client = TestClientBuilder::new().build();
+    let client = client.client;
+
+    let app = client
+        .application()
+        .create(
+            ApplicationIn {
+                name: "app".to_string(),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let tagged = client
+        .message()
+        .create(
+            app.id.clone(),
+            MessageIn {
+                tags: Some(vec![
+                    String::from("customer/cus_1"),
+                    String::from("billing"),
+                ]),
+                ..MessageIn::new(
+                    String::from("invoice.paid"),
+                    serde_json::json!({ "amount": 42 }),
+                )
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let want_tags: HashSet<_> = [String::from("customer/cus_1"), String::from("billing")]
+        .into_iter()
+        .collect();
+    let got_tags: HashSet<_> = tagged.tags.clone().unwrap().into_iter().collect();
+    assert_eq!(want_tags, got_tags);
+
+    let untagged = client
+        .message()
+        .create(
+            app.id.clone(),
+            MessageIn::new(
+                String::from("invoice.paid"),
+                serde_json::json!({ "amount": 7 }),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(untagged.tags.unwrap_or_default().is_empty());
+
+    let list = client
+        .message()
+        .list(
+            app.id.clone(),
+            Some(MessageListOptions {
+                tag: Some(String::from("billing")),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let ids: Vec<_> = list.data.into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec![tagged.id]);
 
     client.application().delete(app.id).await.unwrap()
 }

@@ -61,4 +61,33 @@ test("e2e tests", { skip: client === null }, async (t) => {
     // Should not throw an error while trying to deserialize the empty body.
     await client.endpoint.delete(appOut.id, epOut.id);
   });
+
+  await t.test("message tags", async () => {
+    if (client === null || client === undefined) {
+      throw new Error("unreachable");
+    }
+
+    const appOut = await client.application.create({ name: "App" });
+
+    const tagged = await client.message.create(appOut.id, {
+      eventType: "invoice.paid",
+      payload: { amount: 42 },
+      tags: ["customer/cus_1", "billing"],
+    });
+    assert.deepEqual(tagged.tags?.sort(), ["billing", "customer/cus_1"]);
+
+    const untagged = await client.message.create(appOut.id, {
+      eventType: "invoice.paid",
+      payload: { amount: 7 },
+    });
+    assert.deepEqual(untagged.tags || [], []);
+
+    const listed = await client.message.list(appOut.id, { tag: "billing" });
+    assert.deepEqual(
+      listed.data.map((m) => m.id),
+      [tagged.id]
+    );
+
+    await client.application.delete(appOut.id);
+  });
 });

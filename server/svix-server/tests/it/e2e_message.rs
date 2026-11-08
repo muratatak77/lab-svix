@@ -8,6 +8,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
 use serde::de::IgnoredAny;
 use serde_json::json;
 use svix_server::{
+    core::types::{MessageTag, MessageTagSet},
     db::models::messagecontent,
     expired_message_cleaner,
     v1::{
@@ -25,7 +26,10 @@ fn rand_str(len: usize) -> String {
 
 use crate::utils::{
     TestReceiver,
-    common_calls::{create_test_app, create_test_endpoint, create_test_msg_with, message_in},
+    common_calls::{
+        create_test_app, create_test_endpoint, create_test_msg_with, create_test_msg_with_tags,
+        message_in,
+    },
     run_with_retries, start_svix_server,
 };
 
@@ -108,6 +112,169 @@ async fn test_message_create_read_list() {
         .unwrap();
     assert_eq!(list.data.len(), 1);
     assert!(list.data.contains(&message_3));
+}
+
+fn tag_set(tags: &[&str]) -> MessageTagSet {
+    MessageTagSet(tags.iter().map(|t| MessageTag(t.to_string())).collect())
+}
+
+#[tokio::test]
+async fn test_message_tags() {
+    let (client, _jh) = start_svix_server().await;
+
+    let app_id = create_test_app(&client, "v1MessageTagsTestApp")
+        .await
+        .unwrap()
+        .id;
+
+    let untagged: MessageOut = client
+        .post(
+            &format!("api/v1/app/{app_id}/msg/"),
+            message_in("event.type", json!({ "test": "untagged" })).unwrap(),
+            StatusCode::ACCEPTED,
+        )
+        .await
+        .unwrap();
+    assert_eq!(untagged.tags, None);
+
+    let msg_1 = create_test_msg_with_tags(
+        &client,
+        &app_id,
+        json!({ "test": "value1" }),
+        &["customer/cus_1", "billing"],
+    )
+    .await;
+    assert_eq!(msg_1.tags, Some(tag_set(&["customer/cus_1", "billing"])));
+
+    let msg_2 = create_test_msg_with_tags(
+        &client,
+        &app_id,
+        json!({ "test": "value2" }),
+        &["customer/cus_2", "billing", "issue#7"],
+    )
+    .await;
+
+    // Tags are persisted and returned on read
+    let fetched: MessageOut = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/{}/", msg_2.id),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fetched.tags,
+        Some(tag_set(&["customer/cus_2", "billing", "issue#7"]))
+    );
+
+    let list: ListResponse<MessageOut> = client
+        .get(&format!("api/v1/app/{app_id}/msg/"), StatusCode::OK)
+        .await
+        .unwrap();
+    assert_eq!(list.data.len(), 3);
+
+    let list: ListResponse<MessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/?tag=billing"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.data.len(), 2);
+    assert!(list.data.contains(&msg_1));
+    assert!(list.data.contains(&msg_2));
+
+    let list: ListResponse<MessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/?tag=customer/cus_1"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.data, vec![msg_1.clone()]);
+
+    // `#` has to be percent-encoded in the query string
+    let list: ListResponse<MessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/?tag=issue%237"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.data, vec![msg_2.clone()]);
+
+    // The tag filter is an exact match, not a prefix match
+    let list: ListResponse<MessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/?tag=customer"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert!(list.data.is_empty());
+
+    // Tag filters can be combined with the other filters
+    let list: ListResponse<MessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/?tag=billing&event_types=other.type"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert!(list.data.is_empty());
+
+    let _: IgnoredAny = client
+        .get(
+            &format!("api/v1/app/{app_id}/msg/?tag=not%20valid"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_message_tags_validation() {
+    let (client, _jh) = start_svix_server().await;
+
+    let app_id = create_test_app(&client, "v1MessageTagsValidationApp")
+        .await
+        .unwrap()
+        .id;
+
+    for tags in [
+        json!([]),
+        json!(["t1", "t2", "t3", "t4", "t5", "t6"]),
+        json!(["has space"]),
+        json!(["x".repeat(129)]),
+    ] {
+        let _: IgnoredAny = client
+            .post(
+                &format!("api/v1/app/{app_id}/msg/"),
+                json!({
+                    "eventType": "event.type",
+                    "payload": {},
+                    "tags": tags,
+                }),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Explicit `null` is the same as omitting the field
+    let msg: MessageOut = client
+        .post(
+            &format!("api/v1/app/{app_id}/msg/"),
+            json!({
+                "eventType": "event.type",
+                "payload": {},
+                "tags": null,
+            }),
+            StatusCode::ACCEPTED,
+        )
+        .await
+        .unwrap();
+    assert_eq!(msg.tags, None);
 }
 
 #[tokio::test]

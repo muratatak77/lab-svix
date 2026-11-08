@@ -611,6 +611,21 @@
                     "status": {
                         "$ref": "#/components/schemas/MessageStatus"
                     },
+                    "tags": {
+                        "example": [
+                            "my_tag",
+                            "other"
+                        ],
+                        "items": {
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
+                            "type": "string"
+                        },
+                        "nullable": true,
+                        "type": "array",
+                        "uniqueItems": true
+                    },
                     "timestamp": {
                         "format": "date-time",
                         "type": "string"
@@ -2064,6 +2079,24 @@
                         "maximum": 90,
                         "minimum": 5,
                         "type": "integer"
+                    },
+                    "tags": {
+                        "description": "List of free-form tags that can be filtered by when listing messages",
+                        "example": [
+                            "my_tag",
+                            "other"
+                        ],
+                        "items": {
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
+                            "type": "string"
+                        },
+                        "maxItems": 5,
+                        "minItems": 1,
+                        "nullable": true,
+                        "type": "array",
+                        "uniqueItems": true
                     }
                 },
                 "required": [
@@ -2117,6 +2150,21 @@
                             "username": "test_user"
                         },
                         "type": "object"
+                    },
+                    "tags": {
+                        "example": [
+                            "my_tag",
+                            "other"
+                        ],
+                        "items": {
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
+                            "type": "string"
+                        },
+                        "nullable": true,
+                        "type": "array",
+                        "uniqueItems": true
                     },
                     "timestamp": {
                         "format": "date-time",
@@ -2935,6 +2983,20 @@
                         "style": "form"
                     },
                     {
+                        "description": "Filter response based on the tag",
+                        "in": "query",
+                        "name": "tag",
+                        "schema": {
+                            "description": "Filter response based on the tag",
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "nullable": true,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
+                            "type": "string"
+                        },
+                        "style": "form"
+                    },
+                    {
                         "description": "Only include items created before a certain date",
                         "in": "query",
                         "name": "before",
@@ -3153,6 +3215,20 @@
                             "maxLength": 128,
                             "nullable": true,
                             "pattern": "^[a-zA-Z0-9\\-_.]+$",
+                            "type": "string"
+                        },
+                        "style": "form"
+                    },
+                    {
+                        "description": "Filter response based on the tag",
+                        "in": "query",
+                        "name": "tag",
+                        "schema": {
+                            "description": "Filter response based on the tag",
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "nullable": true,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
                             "type": "string"
                         },
                         "style": "form"
@@ -4409,6 +4485,20 @@
                         "style": "form"
                     },
                     {
+                        "description": "Filter response based on the message tags",
+                        "in": "query",
+                        "name": "tag",
+                        "schema": {
+                            "description": "Filter response based on the message tags",
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "nullable": true,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
+                            "type": "string"
+                        },
+                        "style": "form"
+                    },
+                    {
                         "description": "Filter response based on the delivery status",
                         "in": "query",
                         "name": "status",
@@ -5276,6 +5366,20 @@
                         "style": "form"
                     },
                     {
+                        "description": "Filter messages matching the provided tag.",
+                        "in": "query",
+                        "name": "tag",
+                        "schema": {
+                            "description": "Filter messages matching the provided tag.",
+                            "example": "project_1337",
+                            "maxLength": 128,
+                            "nullable": true,
+                            "pattern": "^[a-zA-Z0-9\\-_./\\\\#]+$",
+                            "type": "string"
+                        },
+                        "style": "form"
+                    },
+                    {
                         "description": "Filter response based on the event type",
                         "in": "query",
                         "name": "event_types",
@@ -5372,7 +5476,7 @@
                 ]
             },
             "post": {
-                "description": "Creates a new message and dispatches it to all of the application's endpoints.\n\nThe `eventId` is an optional custom unique ID. It's verified to be unique only up to a day, after that no verification will be made.\nIf a message with the same `eventId` already exists for any application in your environment, a 409 conflict error will be returned.\n\nThe `eventType` indicates the type and schema of the event. All messages of a certain `eventType` are expected to have the same schema. Endpoints can choose to only listen to specific event types.\nMessages can also have `channels`, which similar to event types let endpoints filter by them. Unlike event types, messages can have multiple channels, and channels don't imply a specific message content or schema.\n\nThe `payload` property is the webhook's body (the actual webhook message). Svix supports payload sizes of up to ~350kb, though it's generally a good idea to keep webhook payloads small, probably no larger than 40kb.",
+                "description": "Creates a new message and dispatches it to all of the application's endpoints.\n\nThe `eventId` is an optional custom unique ID. It's verified to be unique only up to a day, after that no verification will be made.\nIf a message with the same `eventId` already exists for any application in your environment, a 409 conflict error will be returned.\n\nThe `eventType` indicates the type and schema of the event. All messages of a certain `eventType` are expected to have the same schema. Endpoints can choose to only listen to specific event types.\nMessages can also have `channels`, which similar to event types let endpoints filter by them. Unlike event types, messages can have multiple channels, and channels don't imply a specific message content or schema.\n\nMessages can additionally be given `tags`. Tags don't affect delivery in any way, but messages and message attempts can be filtered by them when listing, which is useful for finding all the messages related to e.g. a specific customer or resource.\n\nThe `payload` property is the webhook's body (the actual webhook message). Svix supports payload sizes of up to ~350kb, though it's generally a good idea to keep webhook payloads small, probably no larger than 40kb.",
                 "operationId": "v1.message.create",
                 "parameters": [
                     {

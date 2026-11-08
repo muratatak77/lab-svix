@@ -622,6 +622,73 @@ impl Validate for EventChannelSet {
     }
 }
 
+string_wrapper!(
+    MessageTag,
+    crate::core::types::StringSchema {
+        string_validation: Some(schemars::schema::StringValidation {
+            max_length: Some(MessageTag::MAX_LENGTH as u32),
+            min_length: None,
+            pattern: Some(r"^[a-zA-Z0-9\-_./\\#]+$".to_string()),
+        }),
+        example: Some("project_1337".to_string()),
+    }
+);
+
+impl MessageTag {
+    pub const MAX_LENGTH: usize = 128;
+}
+
+impl Validate for MessageTag {
+    fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        // Tags are a bit more permissive than channels: on top of the usual identifier
+        // characters they may contain `/`, `\` and `#`, which makes it possible to tag
+        // messages with things like resource paths (`user/42`) or ticket refs (`issue#7`).
+        static RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9\-_./\\#]+$").unwrap());
+
+        let mut errors = ValidationErrors::new();
+        if self.0.is_empty() {
+            errors.add(
+                ALL_ERROR,
+                validation_error(Some("length"), Some("Tag must be at least one character")),
+            );
+        } else if self.0.len() > Self::MAX_LENGTH {
+            errors.add(
+                ALL_ERROR,
+                validation_error(Some("length"), Some("Tag too long")),
+            );
+        } else if !RE.is_match(&self.0) {
+            errors.add(
+                ALL_ERROR,
+                validation_error(
+                    Some("illegal_string_pattern"),
+                    Some("Tag must match the following pattern: [a-zA-Z0-9\\-_./\\\\#]."),
+                ),
+            );
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(transparent)]
+pub struct MessageTagSet(pub HashSet<MessageTag>);
+json_wrapper!(MessageTagSet);
+
+impl Validate for MessageTagSet {
+    fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        for item in self.0.iter() {
+            item.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(transparent)]
 pub struct EventTypeNameSet(pub HashSet<EventTypeName>);
@@ -1432,7 +1499,7 @@ mod tests {
 
     use super::{
         ApplicationId, ApplicationUid, EndpointHeaders, EndpointHeadersPatch, EndpointSecret,
-        EventChannel, EventTypeName, validate_header_map,
+        EventChannel, EventTypeName, MessageTag, validate_header_map,
     };
     use crate::core::cryptography::AsymmetricKey;
 
@@ -1506,6 +1573,34 @@ mod tests {
         let long_str: String = "X".repeat(300);
         let evt_name = EventChannel(long_str);
         assert!(evt_name.validate().is_err());
+    }
+
+    #[test]
+    fn test_message_tag_validation() {
+        for valid in [
+            "my_tag",
+            "azAZ09-_.",
+            "user/42",
+            "issue#7",
+            "windows\\path",
+            &"X".repeat(MessageTag::MAX_LENGTH),
+        ] {
+            MessageTag(valid.to_owned()).validate().unwrap();
+        }
+
+        for invalid in [
+            "",
+            "with space",
+            "emoji🎉",
+            "semi;colon",
+            "a,b",
+            &"X".repeat(MessageTag::MAX_LENGTH + 1),
+        ] {
+            assert!(
+                MessageTag(invalid.to_owned()).validate().is_err(),
+                "{invalid:?} should not be a valid tag"
+            );
+        }
     }
 
     #[test]

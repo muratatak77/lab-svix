@@ -27,7 +27,8 @@ use crate::{
         permissions,
         types::{
             ApplicationIdOrUid, EndpointId, EventChannel, EventChannelSet, EventTypeName,
-            EventTypeNameSet, MessageAttemptTriggerType, MessageId, MessageUid, OrganizationId,
+            EventTypeNameSet, MessageAttemptTriggerType, MessageId, MessageTag, MessageTagSet,
+            MessageUid, OrganizationId,
         },
     },
     db::models::{application, message, messagecontent},
@@ -43,6 +44,18 @@ use crate::{
         },
     },
 };
+
+pub fn validate_tags_msg(tags: &MessageTagSet) -> Result<(), ValidationError> {
+    let len = tags.0.len();
+    if !(1..=5).contains(&len) {
+        Err(validation_error(
+            Some("tags"),
+            Some("Tags must have at least 1 and at most 5 items, or be set to null."),
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 pub fn validate_channels_msg(channels: &EventChannelSet) -> Result<(), ValidationError> {
     let len = channels.0.len();
@@ -124,6 +137,12 @@ pub struct MessageIn {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(example = "example_channel_set", length(min = 1, max = 5))]
     pub channels: Option<EventChannelSet>,
+    /// List of free-form tags that can be filtered by when listing messages
+    #[validate(custom = "validate_tags_msg")]
+    #[validate]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(example = "example_tag_set", length(min = 1, max = 5))]
+    pub tags: Option<MessageTagSet>,
     #[validate(range(min = 5, max = 90))]
     #[serde(default = "default_90")]
     #[schemars(example = "default_90")]
@@ -163,6 +182,10 @@ fn example_channel_set() -> Vec<&'static str> {
     vec!["project_123", "group_2"]
 }
 
+fn example_tag_set() -> Vec<&'static str> {
+    vec!["my_tag", "other"]
+}
+
 fn example_payload() -> serde_json::Value {
     serde_json::json!({
         "email": "test@example.com",
@@ -179,6 +202,7 @@ impl ModelIn for MessageIn {
             uid,
             event_type,
             channels,
+            tags,
             payload_retention_period,
             ..
         } = self;
@@ -189,6 +213,7 @@ impl ModelIn for MessageIn {
         model.event_type = Set(event_type);
         model.expiration = Set(expiration.with_timezone(&Utc).into());
         model.channels = Set(channels);
+        model.tags = Set(tags);
     }
 }
 
@@ -204,6 +229,8 @@ pub struct MessageOut {
     /// List of free-form identifiers that endpoints can filter by
     #[schemars(length(min = 1, max = 5), example = "example_channel_set")]
     pub channels: Option<EventChannelSet>,
+    #[schemars(example = "example_tag_set")]
+    pub tags: Option<MessageTagSet>,
     pub id: MessageId,
     #[serde(rename = "timestamp")]
     pub created_at: DateTime<Utc>,
@@ -239,6 +266,7 @@ impl MessageOut {
             event_type: model.event_type,
             payload,
             channels: model.channels,
+            tags: model.tags,
             id: model.id,
             created_at: model.created_at.into(),
         }
@@ -265,6 +293,9 @@ pub struct ListMessagesQueryParams {
     /// When `true` message payloads are included in the response
     #[serde(default = "default_true")]
     with_content: bool,
+    /// Filter messages matching the provided tag.
+    #[validate]
+    tag: Option<MessageTag>,
 }
 
 /// List all of the application's messages.
@@ -281,6 +312,7 @@ async fn list_messages(
         with_content,
         before,
         after,
+        tag,
     }): ValidatedQuery<ListMessagesQueryParams>,
     EventTypesQueryParams(event_types): EventTypesQueryParams,
     permissions::Application { app }: permissions::Application,
@@ -295,6 +327,10 @@ async fn list_messages(
 
     if let Some(channel) = channel {
         query = query.filter(Expr::cust_with_values("channels @> $1", [channel.jsonb()]));
+    }
+
+    if let Some(tag) = tag {
+        query = query.filter(Expr::cust_with_values("tags @> $1", [tag.jsonb()]));
     }
 
     let (query, iter_direction) = filter_and_paginate_time_limited(
@@ -334,6 +370,8 @@ pub struct CreateMessageQueryParams {
 ///
 /// The `eventType` indicates the type and schema of the event. All messages of a certain `eventType` are expected to have the same schema. Endpoints can choose to only listen to specific event types.
 /// Messages can also have `channels`, which similar to event types let endpoints filter by them. Unlike event types, messages can have multiple channels, and channels don't imply a specific message content or schema.
+///
+/// Messages can additionally be given `tags`. Tags don't affect delivery in any way, but messages and message attempts can be filtered by them when listing, which is useful for finding all the messages related to e.g. a specific customer or resource.
 ///
 /// The `payload` property is the webhook's body (the actual webhook message). Svix supports payload sizes of up to ~350kb, though it's generally a good idea to keep webhook payloads small, probably no larger than 40kb.
 #[aide_annotate(op_id = "v1.message.create")]
@@ -583,6 +621,11 @@ mod tests {
     const EVENT_ID_VALID: &str = "valid-eventId";
     const EVENT_CHANNELS_INVALID: &[&str] = &["valid-event-channel", "&&invalid-event-channel"];
     const EVENT_CHANNELS_VALID: &[&str] = &["valid-event-channel1", "valid-event-channel2"];
+    const TAG_INVALID: &str = "invalid tag";
+    const TAG_VALID: &str = "customer/cus_42";
+    const TAGS_INVALID: &[&str] = &["valid-tag", "invalid tag"];
+    const TAGS_VALID: &[&str] = &["valid-tag", "user/42", "issue#7"];
+    const TAGS_TOO_MANY: &[&str] = &["t1", "t2", "t3", "t4", "t5", "t6"];
 
     #[test]
     fn test_message_in_validation() {
@@ -627,8 +670,30 @@ mod tests {
         }))
         .unwrap();
 
+        let invalid_7: MessageIn = serde_json::from_value(json!({
+            "eventType": EVENT_TYPE_VALID,
+            "payload": {},
+            "tags": TAGS_INVALID
+        }))
+        .unwrap();
+
+        let invalid_8: MessageIn = serde_json::from_value(json!({
+            "eventType": EVENT_TYPE_VALID,
+            "payload": {},
+            "tags": TAGS_TOO_MANY
+        }))
+        .unwrap();
+
+        let invalid_9: MessageIn = serde_json::from_value(json!({
+            "eventType": EVENT_TYPE_VALID,
+            "payload": {},
+            "tags": []
+        }))
+        .unwrap();
+
         for m in [
-            invalid_1, invalid_2, invalid_3, invalid_4, invalid_5, invalid_6,
+            invalid_1, invalid_2, invalid_3, invalid_4, invalid_5, invalid_6, invalid_7, invalid_8,
+            invalid_9,
         ] {
             assert!(m.validate().is_err());
         }
@@ -637,7 +702,8 @@ mod tests {
             "eventId": EVENT_ID_VALID,
             "eventType": EVENT_TYPE_VALID,
             "payload": {},
-            "channels": EVENT_CHANNELS_VALID
+            "channels": EVENT_CHANNELS_VALID,
+            "tags": TAGS_VALID
         }))
         .unwrap();
         valid.validate().unwrap();
@@ -651,6 +717,14 @@ mod tests {
 
         let valid: ListMessagesQueryParams =
             serde_json::from_value(json!({ "channel": CHANNEL_VALID })).unwrap();
+        valid.validate().unwrap();
+
+        let invalid: ListMessagesQueryParams =
+            serde_json::from_value(json!({ "tag": TAG_INVALID })).unwrap();
+        assert!(invalid.validate().is_err());
+
+        let valid: ListMessagesQueryParams =
+            serde_json::from_value(json!({ "tag": TAG_VALID })).unwrap();
         valid.validate().unwrap();
     }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+* Server: Add support for message `tags`
+  * Messages can be created with up to 5 free-form tags, which are returned on `MessageOut`
+  * `v1.message.list`, `v1.message-attempt.list-by-endpoint`, `v1.message-attempt.list-by-msg`
+    and `v1.message-attempt.list-attempted-messages` accept a `tag` query parameter
+* Libs: Exercise message tags in the kitchen sink tests
+
 ## Version 1.90.0
 * Server: Add `throttleRate` to endpoint and application
   * This replaces `rateLimit` because the name caused some confusion

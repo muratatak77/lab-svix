@@ -24,7 +24,7 @@ use crate::utils::{
     TestReceiver,
     common_calls::{
         create_test_app, create_test_endpoint, create_test_message, create_test_msg_with,
-        endpoint_in, get_msg_attempt_list_and_assert_count,
+        create_test_msg_with_tags, endpoint_in, get_msg_attempt_list_and_assert_count,
     },
     get_default_test_config, run_with_retries, start_svix_server, start_svix_server_with_cfg,
 };
@@ -718,6 +718,145 @@ async fn test_list_attempts_by_endpoint() {
 
     receiver_1.jh.abort();
     receiver_2.jh.abort();
+}
+
+#[tokio::test]
+async fn test_list_attempts_by_tag() {
+    let (client, _jh) = start_svix_server().await;
+
+    let app_id = create_test_app(&client, "v1AttemptListAttemptsByTagTestApp")
+        .await
+        .unwrap()
+        .id;
+
+    let receiver = TestReceiver::start(axum::http::StatusCode::OK);
+    let endp_id = create_test_endpoint(&client, &app_id, &receiver.endpoint)
+        .await
+        .unwrap()
+        .id;
+
+    let untagged = create_test_message(&client, &app_id, json!({"test": "untagged"}))
+        .await
+        .unwrap();
+    let order_1 = create_test_msg_with_tags(
+        &client,
+        &app_id,
+        json!({"test": "order1"}),
+        &["orders", "order/1"],
+    )
+    .await;
+    let order_2 = create_test_msg_with_tags(
+        &client,
+        &app_id,
+        json!({"test": "order2"}),
+        &["orders", "order/2"],
+    )
+    .await;
+
+    run_with_retries(|| async {
+        let list: ListResponse<MessageAttemptOut> = client
+            .get(
+                &format!("api/v1/app/{app_id}/attempt/endpoint/{endp_id}/"),
+                StatusCode::OK,
+            )
+            .await?;
+        if list.data.len() != 3 {
+            anyhow::bail!("list len {}, not 3", list.data.len());
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // List attempts by endpoint
+    let attempts: ListResponse<MessageAttemptOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/attempt/endpoint/{endp_id}/?tag=orders"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    // Attempts are listed newest first
+    let msg_ids: Vec<_> = attempts.data.into_iter().map(|a| a.msg_id).collect();
+    assert_eq!(msg_ids, vec![order_2.id.clone(), order_1.id.clone()]);
+
+    let attempts: ListResponse<MessageAttemptOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/attempt/endpoint/{endp_id}/?tag=order/2"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert_eq!(attempts.data.len(), 1);
+    assert_eq!(attempts.data[0].msg_id, order_2.id);
+
+    // Tag and channel filters both apply
+    let attempts: ListResponse<MessageAttemptOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/attempt/endpoint/{endp_id}/?tag=orders&channel=news"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert!(attempts.data.is_empty());
+
+    // List attempts by message
+    for (msg_id, tag, expected_len) in [
+        (&order_1.id, "orders", 1),
+        (&order_1.id, "order/2", 0),
+        (&untagged.id, "orders", 0),
+    ] {
+        let attempts: ListResponse<MessageAttemptOut> = client
+            .get(
+                &format!("api/v1/app/{app_id}/attempt/msg/{msg_id}/?tag={tag}"),
+                StatusCode::OK,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            attempts.data.len(),
+            expected_len,
+            "unexpected number of attempts for {msg_id} with tag {tag}"
+        );
+    }
+
+    // List attempted messages
+    let messages: ListResponse<EndpointMessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/endpoint/{endp_id}/msg/?tag=order/1"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.data.len(), 1);
+    assert_eq!(messages.data[0].msg.id, order_1.id);
+    assert_eq!(messages.data[0].msg.tags, order_1.tags);
+
+    let messages: ListResponse<EndpointMessageOut> = client
+        .get(
+            &format!("api/v1/app/{app_id}/endpoint/{endp_id}/msg/?tag=unknown"),
+            StatusCode::OK,
+        )
+        .await
+        .unwrap();
+    assert!(messages.data.is_empty());
+
+    // Invalid tags are rejected rather than silently matching nothing
+    for url in [
+        format!("api/v1/app/{app_id}/attempt/endpoint/{endp_id}/?tag=bad%20tag"),
+        format!(
+            "api/v1/app/{app_id}/attempt/msg/{}/?tag=bad%20tag",
+            order_1.id
+        ),
+        format!("api/v1/app/{app_id}/endpoint/{endp_id}/msg/?tag=bad%20tag"),
+    ] {
+        let _: serde_json::Value = client
+            .get(&url, StatusCode::UNPROCESSABLE_ENTITY)
+            .await
+            .unwrap();
+    }
+
+    receiver.jh.abort();
 }
 
 #[tokio::test]
