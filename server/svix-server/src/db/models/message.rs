@@ -5,8 +5,8 @@ use chrono::Utc;
 use sea_orm::{ActiveValue::Set, Condition, entity::prelude::*};
 
 use crate::core::types::{
-    ApplicationId, BaseId, EventChannelSet, EventTypeName, MessageId, MessageIdOrUid, MessageUid,
-    OrganizationId,
+    ApplicationId, BaseId, EventChannelSet, EventTypeName, MessageId, MessageIdOrUid,
+    MessageTagSet, MessageUid, OrganizationId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -22,6 +22,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", column_name = "payload", nullable)]
     pub legacy_payload: Option<Json>,
     pub channels: Option<EventChannelSet>,
+    pub tags: Option<MessageTagSet>,
     pub expiration: DateTimeWithTimeZone,
 }
 

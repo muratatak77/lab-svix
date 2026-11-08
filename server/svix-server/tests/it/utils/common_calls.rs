@@ -123,6 +123,7 @@ pub fn message_in<T: Serialize>(event_type: &str, payload: T) -> Result<MessageI
         payload: RawPayload::from_string(serde_json::to_string(&payload)?)?,
         payload_retention_period: 5,
         channels: None,
+        tags: None,
         uid: None,
         extra_params: None,
         application: None,
@@ -168,6 +169,27 @@ pub async fn create_test_msg_with(
         .post(
             &format!("api/v1/app/{app_id}/msg/"),
             message_in,
+            StatusCode::ACCEPTED,
+        )
+        .await
+        .unwrap()
+}
+
+pub async fn create_test_msg_with_tags(
+    client: &TestClient,
+    app_id: &ApplicationId,
+    payload: serde_json::Value,
+    tags: &[&str],
+) -> MessageOut {
+    client
+        .post(
+            &format!("api/v1/app/{app_id}/msg/"),
+            json!({
+                "eventType": "event.type",
+                "payload": payload,
+                "payloadRetentionPeriod": 5,
+                "tags": tags,
+            }),
             StatusCode::ACCEPTED,
         )
         .await

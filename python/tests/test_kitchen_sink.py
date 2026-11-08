@@ -7,6 +7,8 @@ from svix.api import (
     ApplicationIn,
     EndpointIn,
     EventTypeIn,
+    MessageIn,
+    MessageListOptions,
     Svix,
 )
 from svix.exceptions import HttpError
@@ -53,3 +55,31 @@ def test_endpoint_crud() -> None:
 
     # Should succeed without error if the deserialization handles empty response bodies correctly
     CLIENT.endpoint.delete(app.id, ep.id)
+
+
+@pytest.mark.skipif(
+    CLIENT is None,
+    reason="SVIX_TOKEN and SVIX_SERVER_URL are required to run this test",
+)
+def test_message_tags() -> None:
+    app = CLIENT.application.create(ApplicationIn(name="app"))
+
+    tagged = CLIENT.message.create(
+        app.id,
+        MessageIn(
+            event_type="invoice.paid",
+            payload={"amount": 42},
+            tags=["customer/cus_1", "billing"],
+        ),
+    )
+    assert set(tagged.tags) == {"customer/cus_1", "billing"}
+
+    untagged = CLIENT.message.create(
+        app.id, MessageIn(event_type="invoice.paid", payload={"amount": 7})
+    )
+    assert not untagged.tags
+
+    listed = CLIENT.message.list(app.id, MessageListOptions(tag="billing"))
+    assert [m.id for m in listed.data] == [tagged.id]
+
+    CLIENT.application.delete(app.id)

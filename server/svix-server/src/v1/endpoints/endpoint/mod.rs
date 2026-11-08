@@ -847,6 +847,7 @@ async fn send_example(
 
     let msg_in = MessageIn {
         channels: None,
+        tags: None,
         event_type: data.event_type,
         payload: RawPayload::from_string(example).unwrap(),
         uid: None,

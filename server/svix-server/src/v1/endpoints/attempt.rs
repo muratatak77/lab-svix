@@ -26,7 +26,7 @@ use crate::{
         permissions,
         types::{
             BaseId, EndpointId, EndpointIdOrUid, EventChannel, EventTypeNameSet, MessageAttemptId,
-            MessageAttemptTriggerType, MessageId, MessageStatus, MessageStatusText,
+            MessageAttemptTriggerType, MessageId, MessageStatus, MessageStatusText, MessageTag,
             StatusCodeClass,
         },
     },
@@ -165,6 +165,9 @@ pub struct ListAttemptedMessagesQueryParams {
     /// Filter response based on the channel
     #[validate]
     channel: Option<EventChannel>,
+    /// Filter response based on the message tags
+    #[validate]
+    tag: Option<MessageTag>,
     /// Filter response based on the delivery status
     status: Option<MessageStatus>,
     /// Only include items created before a certain date
@@ -242,6 +245,7 @@ async fn list_attempted_messages(
     ValidatedQuery(pagination): ValidatedQuery<PaginationDescending<ReversibleIterator<MessageId>>>,
     ValidatedQuery(ListAttemptedMessagesQueryParams {
         channel,
+        tag,
         status,
         before,
         after,
@@ -267,6 +271,10 @@ async fn list_attempted_messages(
     if let Some(channel) = channel {
         msgs_and_dests =
             msgs_and_dests.filter(Expr::cust_with_values("channels @> $1", [channel.jsonb()]));
+    }
+
+    if let Some(tag) = tag {
+        msgs_and_dests = msgs_and_dests.filter(Expr::cust_with_values("tags @> $1", [tag.jsonb()]));
     }
 
     let now = chrono::Utc::now();
@@ -449,6 +457,9 @@ pub struct ListAttemptsByEndpointQueryParams {
     /// Filter response based on the channel
     #[validate]
     channel: Option<EventChannel>,
+    /// Filter response based on the tag
+    #[validate]
+    tag: Option<MessageTag>,
     /// Only include items created before a certain date
     before: Option<DateTime<Utc>>,
     /// Only include items created after a certain date
@@ -465,6 +476,7 @@ fn list_attempts_by_endpoint_or_message_filters(
     status_code_class: Option<StatusCodeClass>,
     event_types: Option<EventTypeNameSet>,
     channel: Option<EventChannel>,
+    tag: Option<MessageTag>,
 ) -> Select<messageattempt::Entity> {
     if let Some(status) = status {
         query = query.filter(messageattempt::Column::Status.eq(status));
@@ -498,8 +510,8 @@ fn list_attempts_by_endpoint_or_message_filters(
         None => query,
     };
 
-    // The event_types and channel filter require joining the associated message
-    if event_types.is_some() || channel.is_some() {
+    // The event_types, channel and tag filters require joining the associated message
+    if event_types.is_some() || channel.is_some() || tag.is_some() {
         query = query.join_rev(
             sea_orm::JoinType::InnerJoin,
             message::Entity::belongs_to(messageattempt::Entity)
@@ -519,6 +531,10 @@ fn list_attempts_by_endpoint_or_message_filters(
             // `.filter` calls.
             query = query.filter(Expr::cust_with_values("channels @> $1", [channel.jsonb()]));
         }
+
+        if let Some(tag) = tag {
+            query = query.filter(Expr::cust_with_values("tags @> $1", [tag.jsonb()]));
+        }
     }
 
     query
@@ -535,6 +551,7 @@ async fn list_attempts_by_endpoint(
         status,
         status_code_class,
         channel,
+        tag,
         before,
         after,
         with_content,
@@ -556,6 +573,7 @@ async fn list_attempts_by_endpoint(
         status_code_class,
         event_types,
         channel,
+        tag,
     );
 
     let (query, iter_direction) = filter_and_paginate_time_limited(
@@ -598,6 +616,9 @@ pub struct ListAttemptsByMsgQueryParams {
     /// Filter response based on the channel
     #[validate]
     channel: Option<EventChannel>,
+    /// Filter response based on the tag
+    #[validate]
+    tag: Option<MessageTag>,
     /// Filter the attempts based on the attempted endpoint
     #[validate]
     endpoint_id: Option<EndpointIdOrUid>,
@@ -621,6 +642,7 @@ async fn list_attempts_by_msg(
         status,
         status_code_class,
         channel,
+        tag,
         endpoint_id,
         before,
         after,
@@ -643,6 +665,7 @@ async fn list_attempts_by_msg(
         status_code_class,
         event_types,
         channel,
+        tag,
     );
 
     if let Some(endpoint_id) = endpoint_id {
@@ -1129,6 +1152,8 @@ mod tests {
     const VALID_CHANNEL: &str = "valid-channel";
     const INVALID_ENDPOINT_ID: &str = "$$invalid-endpoint";
     const VALID_ENDPOINT_ID: &str = "ep_valid-endpoint";
+    const INVALID_TAG: &str = "invalid tag";
+    const VALID_TAG: &str = "customer/cus_42";
 
     #[test]
     fn test_list_attempted_messages_query_params_validation() {
@@ -1139,6 +1164,14 @@ mod tests {
         let q: ListAttemptedMessagesQueryParams =
             serde_json::from_value(json!({ "channel": VALID_CHANNEL })).unwrap();
         q.validate().unwrap();
+
+        let q: ListAttemptedMessagesQueryParams =
+            serde_json::from_value(json!({ "tag": INVALID_TAG })).unwrap();
+        assert!(q.validate().is_err());
+
+        let q: ListAttemptedMessagesQueryParams =
+            serde_json::from_value(json!({ "tag": VALID_TAG })).unwrap();
+        q.validate().unwrap();
     }
 
     #[test]
@@ -1146,6 +1179,14 @@ mod tests {
         let q: ListAttemptsByEndpointQueryParams =
             serde_json::from_value(json!({ "channel": INVALID_CHANNEL })).unwrap();
         assert!(q.validate().is_err());
+
+        let q: ListAttemptsByEndpointQueryParams =
+            serde_json::from_value(json!({ "tag": INVALID_TAG })).unwrap();
+        assert!(q.validate().is_err());
+
+        let q: ListAttemptsByEndpointQueryParams =
+            serde_json::from_value(json!({ "tag": VALID_TAG })).unwrap();
+        q.validate().unwrap();
     }
 
     #[test]
@@ -1158,9 +1199,14 @@ mod tests {
             serde_json::from_value(json!({ "endpoint_id": INVALID_ENDPOINT_ID })).unwrap();
         assert!(q.validate().is_err());
 
+        let q: ListAttemptsByMsgQueryParams =
+            serde_json::from_value(json!({ "tag": INVALID_TAG })).unwrap();
+        assert!(q.validate().is_err());
+
         let q: ListAttemptsByMsgQueryParams = serde_json::from_value(json!(
             {
                 "channel": VALID_CHANNEL,
+                "tag": VALID_TAG,
                 "endpoint_id": VALID_ENDPOINT_ID
             }
         ))

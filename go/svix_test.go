@@ -213,6 +213,55 @@ func TestKitchenSink(t *testing.T) {
 	}
 }
 
+// Creates messages with and without tags and checks that listing by tag only returns the tagged ones.
+func TestMessageTags(t *testing.T) {
+	ctx := context.Background()
+	client := getTestClient(t)
+
+	app, err := client.Application.Create(ctx, models.ApplicationIn{
+		Name: "test",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteApp(t, ctx, *client, app.Id)
+
+	tagged, err := client.Message.Create(ctx, app.Id, models.MessageIn{
+		EventType: "invoice.paid",
+		Payload:   map[string]any{"amount": 42},
+		Tags:      []string{"customer/cus_1", "billing"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotTags := append([]string(nil), tagged.Tags...)
+	sort.Strings(gotTags)
+	if !reflect.DeepEqual(gotTags, []string{"billing", "customer/cus_1"}) {
+		t.Fatalf("unexpected tags: %v", tagged.Tags)
+	}
+
+	untagged, err := client.Message.Create(ctx, app.Id, models.MessageIn{
+		EventType: "invoice.paid",
+		Payload:   map[string]any{"amount": 7},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(untagged.Tags) != 0 {
+		t.Fatalf("expected no tags, got %v", untagged.Tags)
+	}
+
+	tag := "billing"
+	list, err := client.Message.List(ctx, app.Id, &svix.MessageListOptions{Tag: &tag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || list.Data[0].Id != tagged.Id {
+		t.Fatalf("expected only %s when listing by tag, got %v", tagged.Id, list.Data)
+	}
+}
+
 func TestStaticNullableString(t *testing.T) {
 	app := &models.ApplicationPatch{
 		Uid: utils.NewNullable("my-uid"),
