@@ -121,6 +121,6 @@ mod tests {
         let encryption = Encryption::new([1; 32]);
         let ciphertext = encryption.encrypt(clear).unwrap();
         let clear2 = encryption.decrypt(&ciphertext).unwrap();
-        assert_ne!(&clear[..], &clear2[..]);
+        assert_eq!(&clear[..], &clear2[..]);
     }
 }
