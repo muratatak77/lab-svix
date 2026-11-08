@@ -115,7 +115,7 @@ async fn test_message_create_read_list() {
 }
 
 fn tag_set(tags: &[&str]) -> MessageTagSet {
-    MessageTagSet(tags.iter().map(|t| MessageTag(t.to_string())).collect())
+    MessageTagSet(tags.iter().map(|t| MessageTag((*t).to_string())).collect())
 }
 
 #[tokio::test]
